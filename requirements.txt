@@ -1,0 +1,2 @@
+openai>=1.30.0
+schwab-py>=1.4.0
