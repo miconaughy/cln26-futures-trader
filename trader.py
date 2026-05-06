@@ -246,6 +246,7 @@ def execute_sell(quantity: int) -> None:
 # ---------- Main cycle ----------
 
 def run_cycle() -> None:
+    global _pending_buy
     log.info("=== Cycle start ===")
     decision = 0
 
