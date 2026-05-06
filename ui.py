@@ -101,36 +101,36 @@ def _trading_loop() -> None:
 class PromptModal(ModalScreen):
 
     CSS = """
-    PromptModal {
-        align: center middle;
-    }
-    #dialog {
-        width: 88%;
-        height: 80%;
+    PromptModal { align: center middle; }
+
+    #pm-dialog {
+        width: 90%;
+        height: 88%;
         background: $surface;
         border: thick $primary;
+        layout: vertical;
     }
-    #dialog-title {
+    #pm-title {
         height: 3;
         background: $primary;
         color: $text;
         content-align: center middle;
         padding: 0 2;
     }
-    .prompt-label {
+    #pm-subtitle {
         height: 2;
         padding: 0 2;
         background: $boost;
         color: $text-muted;
         content-align: left middle;
     }
-    .prompt-area {
+    #pm-area {
         height: 1fr;
-        margin: 0 2;
+        margin: 1 2;
         border: tall $accent;
     }
-    .prompt-area:focus-within { border: tall $success; }
-    #dialog-buttons {
+    #pm-area:focus { border: tall $success; }
+    #pm-buttons {
         height: 5;
         layout: horizontal;
         align: center middle;
@@ -138,23 +138,22 @@ class PromptModal(ModalScreen):
     }
     """
 
-    BINDINGS = [("escape", "cancel", "Cancel")]
+    BINDINGS = [("escape", "action_cancel", "Cancel")]
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="dialog"):
-            yield Static("  Edit Grok Prompt", id="dialog-title")
-            yield Static("  PROMPT — sent to Grok every cycle to determine buy/no-buy", classes="prompt-label")
-            yield TextArea(trader.PROMPT, id="prompt-area", classes="prompt-area")
-            yield Horizontal(
-                Button("Save",   id="btn-save",   variant="success"),
-                Button("Cancel", id="btn-cancel", variant="default"),
-                id="dialog-buttons",
-            )
+        with Vertical(id="pm-dialog"):
+            yield Static("  Edit Grok Prompt", id="pm-title")
+            yield Static("  Sent to Grok every cycle — changes take effect on the next cycle", id="pm-subtitle")
+            yield TextArea(trader.PROMPT, id="pm-area", soft_wrap=True, show_line_numbers=False)
+            with Horizontal(id="pm-buttons"):
+                yield Button("Save",   id="pm-save",   variant="success")
+                yield Button("Cancel", id="pm-cancel", variant="default")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-save":
-            text = self.query_one("#prompt-area", TextArea).text.strip()
-            self.dismiss(text or None)
+        event.stop()
+        if event.button.id == "pm-save":
+            text = self.query_one("#pm-area", TextArea).text.strip()
+            self.dismiss(text if text else None)
         else:
             self.dismiss(None)
 
