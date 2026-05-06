@@ -285,6 +285,13 @@ class TraderApp(App):
                 classes="setting-group",
             ),
             Horizontal(
+                Label("Max Contracts", classes="setting-label"),
+                Input(value=str(trader.MAX_CONTRACTS),
+                      placeholder="1",
+                      id="input-max-contracts"),
+                classes="setting-group",
+            ),
+            Horizontal(
                 Label("Interval (s)", classes="setting-label"),
                 Input(value=str(trader.POLL_INTERVAL_SECONDS),
                       placeholder="300",
@@ -309,7 +316,18 @@ class TraderApp(App):
     # ── Input handlers ────────────────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "input-interval":
+        if event.input.id == "input-max-contracts":
+            try:
+                val = int(event.value.strip())
+                if val >= 1:
+                    trader.MAX_CONTRACTS = val
+                    event.input.remove_class("invalid")
+                else:
+                    event.input.add_class("invalid")
+            except ValueError:
+                event.input.add_class("invalid")
+
+        elif event.input.id == "input-interval":
             try:
                 secs = int(event.value.strip())
                 if secs > 0:

@@ -79,7 +79,8 @@ IB_CONTRACT_SYMBOL   = "CL"
 IB_CONTRACT_EXPIRY   = "202607"   # YYYYMM
 IB_CONTRACT_EXCHANGE = "NYMEX"
 IB_CONTRACT_CURRENCY = "USD"
-ORDER_QUANTITY       = 1          # contracts per cycle
+ORDER_QUANTITY       = 1          # contracts per buy order
+MAX_CONTRACTS        = 1          # maximum open contracts allowed at any time
 
 # --- Email alerts ---
 ALERT_EMAIL_FROM     = os.environ.get("ALERT_EMAIL_FROM", "your-sender@gmail.com")
@@ -183,14 +184,22 @@ def send_alert(subject: str, body: str) -> None:
 def get_open_position() -> int:
     """Return long contract count and update position_cache with P&L data."""
     ib = get_ib()
-    count = 0
-    unrealized_pnl = None
 
+    # Use positions() for the authoritative contract count — more reliable than portfolio()
+    count = 0
+    for pos in ib.positions():
+        c = pos.contract
+        if (c.symbol == IB_CONTRACT_SYMBOL
+                and c.lastTradeDateOrContractMonth.startswith(IB_CONTRACT_EXPIRY)):
+            count = int(pos.position) if pos.position > 0 else 0
+            break
+
+    # Use portfolio() for P&L data on the matching position
+    unrealized_pnl = None
     for item in ib.portfolio():
         c = item.contract
         if (c.symbol == IB_CONTRACT_SYMBOL
                 and c.lastTradeDateOrContractMonth.startswith(IB_CONTRACT_EXPIRY)):
-            count = int(item.position) if item.position > 0 else 0
             unrealized_pnl = item.unrealizedPNL
             break
 
@@ -256,8 +265,9 @@ def run_cycle() -> None:
         )
         return
 
-    if decision == 1 and open_contracts == 0:
-        log.info("Signal BUY, no open position — placing buy order.")
+    if decision == 1 and open_contracts < MAX_CONTRACTS:
+        log.info("Signal BUY, holding %d/%d contract(s) — placing buy order.",
+                 open_contracts, MAX_CONTRACTS)
         try:
             execute_buy()
         except Exception as exc:
@@ -266,8 +276,8 @@ def run_cycle() -> None:
                 subject="[Trader] Buy order failed",
                 body=f"Signal was BUY but order failed at {datetime.now()}\n\n{exc}",
             )
-    elif decision == 1 and open_contracts > 0:
-        log.info("Signal BUY, already holding %d contract(s) — holding.", open_contracts)
+    elif decision == 1 and open_contracts >= MAX_CONTRACTS:
+        log.info("Signal BUY, already at max %d contract(s) — holding.", MAX_CONTRACTS)
     elif decision == -1 and open_contracts > 0:
         log.info("Signal SELL, closing open position of %d contract(s).", open_contracts)
         try:
