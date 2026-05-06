@@ -249,6 +249,21 @@ def run_cycle() -> None:
     log.info("=== Cycle start ===")
     decision = 0
 
+    # Fetch position and P&L first so the UI reflects current state before Grok runs
+    try:
+        open_contracts = get_open_position()
+        log.info("Open position: %d contract(s) | Unrealized P&L: %s | Daily P&L: %s",
+                 open_contracts,
+                 f"${position_cache['unrealized_pnl']:,.2f}" if position_cache["unrealized_pnl"] is not None else "—",
+                 f"${position_cache['daily_pnl']:,.2f}"      if position_cache["daily_pnl"]      is not None else "—")
+    except Exception as exc:
+        log.error("Failed to fetch position: %s", exc)
+        send_alert(
+            subject="[Trader] Position check failed — skipping cycle",
+            body=f"Could not read account positions at {datetime.now()}\n\n{exc}",
+        )
+        return
+
     try:
         decision, response_text = query_grok()
         label = {1: "BUY", -1: "SELL", 0: "HOLD"}.get(decision, str(decision))
@@ -262,17 +277,6 @@ def run_cycle() -> None:
             subject="[Trader] Grok API error — defaulting to HOLD",
             body=f"Error at {datetime.now()}\n\n{exc}",
         )
-
-    try:
-        open_contracts = get_open_position()
-        log.info("Open position: %d contract(s)", open_contracts)
-    except Exception as exc:
-        log.error("Failed to fetch position: %s", exc)
-        send_alert(
-            subject="[Trader] Position check failed — skipping cycle",
-            body=f"Could not read account positions at {datetime.now()}\n\n{exc}",
-        )
-        return
 
     # Treat a pending (unconfirmed) buy as already at the limit
     effective_contracts = MAX_CONTRACTS if _pending_buy else open_contracts
