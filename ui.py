@@ -253,6 +253,7 @@ class TraderApp(App):
         ("p", "pause_resume", "Pause / Resume"),
         ("t", "stop_trading", "Stop"),
         ("e", "edit_prompt",  "Edit Prompt"),
+        ("x", "exit_all",     "Exit All"),
         ("q", "quit_app",     "Quit"),
     ]
 
@@ -276,6 +277,7 @@ class TraderApp(App):
             Button("⏸  Pause",       id="btn-pause",       variant="warning", disabled=True),
             Button("⏹  Stop",        id="btn-stop",        variant="error",   disabled=True),
             Button("✎  Edit Prompt", id="btn-edit-prompt", variant="primary"),
+            Button("⚠  Exit All",    id="btn-exit-all",    variant="error"),
             id="controls",
         )
         yield Horizontal(
@@ -346,6 +348,7 @@ class TraderApp(App):
             "btn-pause":       self.action_pause_resume,
             "btn-stop":        self.action_stop_trading,
             "btn-edit-prompt": self.action_edit_prompt,
+            "btn-exit-all":    self.action_exit_all,
         }.get(event.button.id, lambda: None)()
 
     # ── Timers ────────────────────────────────────────────────────────────────
@@ -448,6 +451,24 @@ class TraderApp(App):
         _stop_event.set()
         _pause_event.clear()
         self._apply_state(_STOPPED)
+
+    def action_exit_all(self) -> None:
+        btn = self.query_one("#btn-exit-all", Button)
+        btn.disabled = True
+        btn.label = "Exiting…"
+
+        def _run() -> None:
+            try:
+                trader.close_all_positions()
+            finally:
+                self.call_from_thread(self._reset_exit_button)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _reset_exit_button(self) -> None:
+        btn = self.query_one("#btn-exit-all", Button)
+        btn.disabled = False
+        btn.label = "⚠  Exit All"
 
     def action_edit_prompt(self) -> None:
         def on_dismiss(result: str | None) -> None:

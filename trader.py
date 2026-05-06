@@ -243,6 +243,29 @@ def execute_sell(quantity: int) -> None:
              FUTURES_SYMBOL, quantity, trade.orderStatus.status)
 
 
+def close_all_positions() -> None:
+    """Immediately close all open contracts. Safe to call at any time."""
+    global _pending_buy
+    ib = get_ib()
+    ib.reqPositions()
+    ib.sleep(2)
+
+    quantity = 0
+    for pos in ib.positions():
+        c = pos.contract
+        if c.symbol == IB_CONTRACT_SYMBOL and c.secType == 'FUT':
+            quantity = int(pos.position) if pos.position > 0 else 0
+            break
+
+    if quantity == 0:
+        log.info("Exit All: no open contracts to close.")
+        return
+
+    log.info("Exit All: closing %d contract(s) immediately.", quantity)
+    execute_sell(quantity)
+    _pending_buy = False
+
+
 # ---------- Main cycle ----------
 
 def run_cycle() -> None:
