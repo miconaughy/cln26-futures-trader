@@ -222,7 +222,7 @@ class TraderApp(App):
     Input.invalid { border: tall $error; }
 
     #position-panel {
-        height: 7;
+        height: 9;
         border: tall $primary;
         background: $panel;
         padding: 0 1;
@@ -368,17 +368,33 @@ class TraderApp(App):
             label.update("")
 
     def _refresh_position_panel(self) -> None:
-        content   = self.query_one("#position-content", Static)
-        contracts = trader.position_cache.get("contracts", 0)
-        updated   = trader.position_cache.get("updated_at")
-        decision  = trader.last_decision.get("value")
-        dec_time  = trader.last_decision.get("updated_at")
+        content        = self.query_one("#position-content", Static)
+        contracts      = trader.position_cache.get("contracts", 0)
+        unrealized_pnl = trader.position_cache.get("unrealized_pnl")
+        daily_pnl      = trader.position_cache.get("daily_pnl")
+        updated        = trader.position_cache.get("updated_at")
+        decision       = trader.last_decision.get("value")
+        dec_time       = trader.last_decision.get("updated_at")
 
         lines = []
         if contracts > 0:
             lines.append(f"[green]LONG  {contracts} contract{'s' if contracts != 1 else ''}[/green]  —  {trader.FUTURES_SYMBOL}")
         else:
             lines.append(f"[dim]FLAT[/dim]  —  {trader.FUTURES_SYMBOL}")
+
+        if unrealized_pnl is not None:
+            color = "green" if unrealized_pnl >= 0 else "red"
+            sign  = "+" if unrealized_pnl >= 0 else ""
+            lines.append(f"P&L from open:  [{color}]{sign}${unrealized_pnl:,.2f}[/{color}]")
+        else:
+            lines.append("P&L from open:  [dim]—[/dim]")
+
+        if daily_pnl is not None:
+            color = "green" if daily_pnl >= 0 else "red"
+            sign  = "+" if daily_pnl >= 0 else ""
+            lines.append(f"Daily P&L:      [{color}]{sign}${daily_pnl:,.2f}[/{color}]")
+        else:
+            lines.append("Daily P&L:      [dim]—[/dim]")
 
         if decision is not None and dec_time:
             dec_label = {1: "[green]BUY (1)[/green]", -1: "[red]SELL (-1)[/red]", 0: "[yellow]HOLD (0)[/yellow]"}.get(decision, str(decision))
@@ -387,7 +403,7 @@ class TraderApp(App):
             lines.append("Last Grok signal: [dim]—[/dim]")
 
         if updated:
-            lines.append(f"[dim]Position updated {updated.strftime('%H:%M:%S')}[/dim]")
+            lines.append(f"[dim]Updated {updated.strftime('%H:%M:%S')}[/dim]")
 
         content.update("\n".join(lines))
 

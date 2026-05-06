@@ -98,14 +98,21 @@ POLL_INTERVAL_SECONDS = 300   # 5 minutes
 log = logging.getLogger(__name__)
 
 _ib = IB()
+_pnl_sub = None  # account-level PnL subscription, set on connect
 
 # Shared state — read by ui.py for display
-position_cache: dict = {"contracts": 0, "updated_at": None}
-last_decision:  dict = {"value": None, "updated_at": None}
+position_cache: dict = {
+    "contracts":     0,
+    "unrealized_pnl": None,
+    "daily_pnl":     None,
+    "updated_at":    None,
+}
+last_decision: dict = {"value": None, "updated_at": None}
 
 
 def get_ib() -> IB:
     """Return a connected IB instance, reconnecting automatically if the session dropped."""
+    global _pnl_sub
     if not _ib.isConnected():
         import asyncio
         try:
@@ -114,6 +121,9 @@ def get_ib() -> IB:
             asyncio.set_event_loop(asyncio.new_event_loop())
         _ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
         log.info("Connected to IB Gateway at %s:%d", IB_HOST, IB_PORT)
+        accounts = _ib.managedAccounts()
+        if accounts:
+            _pnl_sub = _ib.reqPnL(accounts[0])
     return _ib
 
 
@@ -171,17 +181,25 @@ def send_alert(subject: str, body: str) -> None:
 # ---------- IBKR ----------
 
 def get_open_position() -> int:
-    """Return the number of long contracts held for the configured futures contract, or 0."""
+    """Return long contract count and update position_cache with P&L data."""
     ib = get_ib()
     count = 0
-    for pos in ib.positions():
-        c = pos.contract
+    unrealized_pnl = None
+
+    for item in ib.portfolio():
+        c = item.contract
         if (c.symbol == IB_CONTRACT_SYMBOL
                 and c.lastTradeDateOrContractMonth.startswith(IB_CONTRACT_EXPIRY)):
-            count = int(pos.position) if pos.position > 0 else 0
+            count = int(item.position) if item.position > 0 else 0
+            unrealized_pnl = item.unrealizedPNL
             break
-    position_cache["contracts"]  = count
-    position_cache["updated_at"] = datetime.now()
+
+    daily_pnl = _pnl_sub.dailyPnL if _pnl_sub is not None else None
+
+    position_cache["contracts"]      = count
+    position_cache["unrealized_pnl"] = unrealized_pnl
+    position_cache["daily_pnl"]      = daily_pnl
+    position_cache["updated_at"]     = datetime.now()
     return count
 
 
