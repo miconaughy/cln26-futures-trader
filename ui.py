@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """
-Trader UI — run this instead of trader.py directly.
+Crude Oil Futures Trader UI — run this instead of trader.py directly.
 
   python3 ui.py
 
 Controls
-  ▶ Start         — begin the polling loop
-  ⏸ Pause         — suspend between cycles (current cycle finishes first)
-  ▶ Resume        — unpause; runs a new cycle immediately
-  ⏹ Stop          — stop trading, keep the UI open
-  ✎ Edit Prompt   — open the prompt editor modal
-  Q               — stop trading and exit
-
-Settings fields (editable any time; take effect on the next cycle):
-  Symbol          — futures contract ticker, e.g. /CLN26
-  Interval (s)    — seconds between cycles, e.g. 300
+  ▶ Start        — connect to IB Gateway and begin the polling loop
+  ⏸ Pause        — suspend between cycles (current cycle finishes first)
+  ▶ Resume       — unpause; runs a new cycle immediately
+  ⏹ Stop         — stop trading, keep the UI open
+  ✎ Edit Prompt  — open the Grok prompt editor
+  Q              — stop trading and exit
 """
 
 import logging
@@ -65,7 +61,15 @@ def _configure_logging() -> None:
 
 def _trading_loop() -> None:
     log = logging.getLogger(__name__)
-    log.info("Trader started.")
+    log.info("Connecting to IB Gateway at %s:%d…", trader.IB_HOST, trader.IB_PORT)
+    try:
+        trader.get_ib()
+    except Exception as exc:
+        log.error("Failed to connect to IB Gateway: %s", exc)
+        log.error("Make sure IB Gateway is running with API enabled on port %d.", trader.IB_PORT)
+        return
+
+    log.info("Trader started | %s | interval=%ds", trader.FUTURES_SYMBOL, trader.POLL_INTERVAL_SECONDS)
 
     while not _stop_event.is_set():
         while _pause_event.is_set():
@@ -75,9 +79,11 @@ def _trading_loop() -> None:
         if _stop_event.is_set():
             break
 
+        _countdown[0] = 0
         run_cycle()
 
-        for remaining in range(trader.POLL_INTERVAL_SECONDS, 0, -1):
+        sleep_secs = int(trader.POLL_INTERVAL_SECONDS)
+        for remaining in range(sleep_secs, 0, -1):
             _countdown[0] = remaining
             if _stop_event.is_set():
                 return
@@ -85,6 +91,7 @@ def _trading_loop() -> None:
                 _countdown[0] = 0
                 break
             time.sleep(1)
+        _countdown[0] = 0
 
     log.info("Trader stopped.")
 
@@ -98,7 +105,7 @@ class PromptModal(ModalScreen):
         align: center middle;
     }
     #dialog {
-        width: 80%;
+        width: 88%;
         height: 80%;
         background: $surface;
         border: thick $primary;
@@ -110,12 +117,19 @@ class PromptModal(ModalScreen):
         content-align: center middle;
         padding: 0 2;
     }
-    #prompt-area {
+    .prompt-label {
+        height: 2;
+        padding: 0 2;
+        background: $boost;
+        color: $text-muted;
+        content-align: left middle;
+    }
+    .prompt-area {
         height: 1fr;
-        margin: 1 2;
+        margin: 0 2;
         border: tall $accent;
     }
-    #prompt-area:focus-within { border: tall $success; }
+    .prompt-area:focus-within { border: tall $success; }
     #dialog-buttons {
         height: 5;
         layout: horizontal;
@@ -128,8 +142,9 @@ class PromptModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Static("  Edit Prompt", id="dialog-title")
-            yield TextArea(trader.PROMPT, id="prompt-area")
+            yield Static("  Edit Grok Prompt", id="dialog-title")
+            yield Static("  PROMPT — sent to Grok every cycle to determine buy/no-buy", classes="prompt-label")
+            yield TextArea(trader.PROMPT, id="prompt-area", classes="prompt-area")
             yield Horizontal(
                 Button("Save",   id="btn-save",   variant="success"),
                 Button("Cancel", id="btn-cancel", variant="default"),
@@ -139,7 +154,7 @@ class PromptModal(ModalScreen):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-save":
             text = self.query_one("#prompt-area", TextArea).text.strip()
-            self.dismiss(text if text else None)
+            self.dismiss(text or None)
         else:
             self.dismiss(None)
 
@@ -167,8 +182,9 @@ class TraderApp(App):
         layout: horizontal;
         align: center middle;
     }
-    #status-label { width: 1fr; }
-    #next-label   { width: 1fr; text-align: right; }
+    #status-label   { width: 20; }
+    #position-label { width: 1fr; content-align: center middle; }
+    #next-label     { width: 1fr; text-align: right; }
 
     #controls {
         height: 5;
@@ -176,7 +192,7 @@ class TraderApp(App):
         align: center middle;
         padding: 1 0;
     }
-    Button { min-width: 16; margin: 0 1; }
+    Button { min-width: 18; margin: 0 1; }
 
     #settings {
         height: 5;
@@ -187,7 +203,7 @@ class TraderApp(App):
         border: tall $primary;
     }
     .setting-group {
-        width: 1fr;
+        width: auto;
         height: auto;
         layout: horizontal;
         align: left middle;
@@ -202,8 +218,24 @@ class TraderApp(App):
         width: 20;
         border: tall $accent;
     }
-    Input:focus  { border: tall $success; }
+    Input:focus   { border: tall $success; }
     Input.invalid { border: tall $error; }
+
+    #position-panel {
+        height: 7;
+        border: tall $primary;
+        background: $panel;
+        padding: 0 1;
+    }
+    #position-header {
+        background: $primary;
+        color: $text;
+        padding: 0 1;
+        height: 1;
+    }
+    #position-content {
+        padding: 0 1;
+    }
 
     #log-header {
         background: $primary;
@@ -234,23 +266,22 @@ class TraderApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Horizontal(
-            Label("[red]⬤[/red]  STOPPED",  id="status-label"),
-            Label(trader.FUTURES_SYMBOL,     id="next-label"),
+            Label("[red]⬤[/red]  STOPPED", id="status-label"),
+            Label("FLAT",                  id="position-label"),
+            Label("",                      id="next-label"),
             id="status-bar",
         )
         yield Horizontal(
-            Button("▶  Start",       id="btn-start",        variant="success"),
-            Button("⏸  Pause",       id="btn-pause",        variant="warning", disabled=True),
-            Button("⏹  Stop",        id="btn-stop",         variant="error",   disabled=True),
-            Button("✎  Edit Prompt", id="btn-edit-prompt",  variant="primary"),
+            Button("▶  Start",       id="btn-start",       variant="success"),
+            Button("⏸  Pause",       id="btn-pause",       variant="warning", disabled=True),
+            Button("⏹  Stop",        id="btn-stop",        variant="error",   disabled=True),
+            Button("✎  Edit Prompt", id="btn-edit-prompt", variant="primary"),
             id="controls",
         )
         yield Horizontal(
             Horizontal(
-                Label("Symbol",       classes="setting-label"),
-                Input(value=trader.FUTURES_SYMBOL,
-                      placeholder="/CLN26",
-                      id="input-symbol"),
+                Label("Symbol", classes="setting-label"),
+                Input(value=trader.FUTURES_SYMBOL, id="input-symbol", disabled=True),
                 classes="setting-group",
             ),
             Horizontal(
@@ -262,6 +293,9 @@ class TraderApp(App):
             ),
             id="settings",
         )
+        yield Static("  Position", id="position-header")
+        with Container(id="position-panel"):
+            yield Static("No position.", id="position-content")
         yield Static("  Activity Log", id="log-header")
         with Container(id="log-wrap"):
             yield RichLog(id="log", highlight=True, markup=True, wrap=True)
@@ -270,20 +304,12 @@ class TraderApp(App):
     def on_mount(self) -> None:
         _configure_logging()
         self.set_interval(0.4, self._drain_log_queue)
-        self.set_interval(1.0, self._refresh_next_label)
+        self.set_interval(1.0, self._refresh_status)
 
     # ── Input handlers ────────────────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "input-symbol":
-            val = event.value.strip()
-            if val:
-                trader.FUTURES_SYMBOL = val
-                event.input.remove_class("invalid")
-            else:
-                event.input.add_class("invalid")
-
-        elif event.input.id == "input-interval":
+        if event.input.id == "input-interval":
             try:
                 secs = int(event.value.strip())
                 if secs > 0:
@@ -297,10 +323,12 @@ class TraderApp(App):
     # ── Button handler ────────────────────────────────────────────────────────
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        {"btn-start":       self.action_start,
-         "btn-pause":       self.action_pause_resume,
-         "btn-stop":        self.action_stop_trading,
-         "btn-edit-prompt": self.action_edit_prompt}.get(event.button.id, lambda: None)()
+        {
+            "btn-start":       self.action_start,
+            "btn-pause":       self.action_pause_resume,
+            "btn-stop":        self.action_stop_trading,
+            "btn-edit-prompt": self.action_edit_prompt,
+        }.get(event.button.id, lambda: None)()
 
     # ── Timers ────────────────────────────────────────────────────────────────
 
@@ -312,22 +340,56 @@ class TraderApp(App):
             except queue.Empty:
                 break
 
+    def _refresh_status(self) -> None:
+        self._refresh_position_label()
+        self._refresh_next_label()
+        self._refresh_position_panel()
+
+    def _refresh_position_label(self) -> None:
+        label    = self.query_one("#position-label", Label)
+        contracts = trader.position_cache.get("contracts", 0)
+        if contracts > 0:
+            label.update(f"[green]{contracts} contract{'s' if contracts != 1 else ''}  {trader.FUTURES_SYMBOL}[/green]")
+        else:
+            label.update("[dim]FLAT[/dim]")
+
     def _refresh_next_label(self) -> None:
         label = self.query_one("#next-label", Label)
         if self._state == _RUNNING:
             secs = _countdown[0]
             if secs > 0:
                 m, s = divmod(secs, 60)
-                label.update(
-                    f"Next cycle in [bold]{m:02d}:{s:02d}[/bold]"
-                    f"  |  {trader.FUTURES_SYMBOL}"
-                )
+                label.update(f"Next cycle in [bold]{m:02d}:{s:02d}[/bold]")
             else:
-                label.update(f"Running cycle…  |  {trader.FUTURES_SYMBOL}")
+                label.update("Running cycle…")
         elif self._state == _PAUSED:
-            label.update(f"[yellow]Paused[/yellow]  |  {trader.FUTURES_SYMBOL}")
+            label.update("[yellow]Paused[/yellow]")
         else:
-            label.update(trader.FUTURES_SYMBOL)
+            label.update("")
+
+    def _refresh_position_panel(self) -> None:
+        content   = self.query_one("#position-content", Static)
+        contracts = trader.position_cache.get("contracts", 0)
+        updated   = trader.position_cache.get("updated_at")
+        decision  = trader.last_decision.get("value")
+        dec_time  = trader.last_decision.get("updated_at")
+
+        lines = []
+        if contracts > 0:
+            lines.append(f"[green]LONG  {contracts} contract{'s' if contracts != 1 else ''}[/green]  —  {trader.FUTURES_SYMBOL}")
+        else:
+            lines.append(f"[dim]FLAT[/dim]  —  {trader.FUTURES_SYMBOL}")
+
+        if decision is not None and dec_time:
+            dec_label = "[green]BUY (1)[/green]" if decision == 1 else "[red]NO BUY (0)[/red]"
+            lines.append(f"Last Grok decision: {dec_label}  at {dec_time.strftime('%H:%M:%S')}")
+        else:
+            lines.append("Last Grok decision: [dim]—[/dim]")
+
+        if updated:
+            lines.append(f"[dim]Position updated {updated.strftime('%H:%M:%S')}[/dim]")
+
+        content.update("\n".join(lines))
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
@@ -354,13 +416,14 @@ class TraderApp(App):
         self._apply_state(_STOPPED)
 
     def action_edit_prompt(self) -> None:
-        def on_dismiss(new_prompt: str | None) -> None:
-            if new_prompt:
-                trader.PROMPT = new_prompt
-                ts = datetime.now().strftime("%H:%M:%S")
-                self.query_one("#log", RichLog).write(
-                    f"[cyan]{ts}  INFO      Prompt updated.[/cyan]"
-                )
+        def on_dismiss(result: str | None) -> None:
+            if result is None:
+                return
+            trader.PROMPT = result
+            ts = datetime.now().strftime("%H:%M:%S")
+            self.query_one("#log", RichLog).write(
+                f"[cyan]{ts}  INFO      Prompt updated.[/cyan]"
+            )
         self.push_screen(PromptModal(), on_dismiss)
 
     def action_quit_app(self) -> None:
@@ -371,11 +434,11 @@ class TraderApp(App):
     # ── State management ──────────────────────────────────────────────────────
 
     def _apply_state(self, state: str) -> None:
-        self._state = state
-        status    = self.query_one("#status-label", Label)
-        btn_start = self.query_one("#btn-start",    Button)
-        btn_pause = self.query_one("#btn-pause",    Button)
-        btn_stop  = self.query_one("#btn-stop",     Button)
+        self._state   = state
+        status        = self.query_one("#status-label", Label)
+        btn_start     = self.query_one("#btn-start",    Button)
+        btn_pause     = self.query_one("#btn-pause",    Button)
+        btn_stop      = self.query_one("#btn-stop",     Button)
 
         if state == _RUNNING:
             status.update("[green]⬤[/green]  RUNNING")

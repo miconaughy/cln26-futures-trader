@@ -1,6 +1,18 @@
-.env
+# OAuth token — never commit this
 schwab_token.json
+
+# Credentials / environment
+.env
+*.env
+
+# Logs
 *.log
+
+# Python
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
