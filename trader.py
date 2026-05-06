@@ -85,6 +85,11 @@ last_decision:  dict = {"value": None, "updated_at": None}
 def get_ib() -> IB:
     """Return a connected IB instance, reconnecting automatically if the session dropped."""
     if not _ib.isConnected():
+        import asyncio
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            asyncio.set_event_loop(asyncio.new_event_loop())
         _ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
         log.info("Connected to IB Gateway at %s:%d", IB_HOST, IB_PORT)
     return _ib
