@@ -38,11 +38,29 @@ GROK_API_KEY = os.environ.get("GROK_API_KEY", "your-xai-api-key-here")
 GROK_MODEL   = "grok-3"
 
 PROMPT = (
-    'You are a seasoned futures trader that specializes within the commodity market - '
-    'specifically crude oil futures. Using all of the most recent articles and publicly '
-    'available information from the web, as well as market trends, make a determination '
-    'to buy or not buy crude oil futures under the ticker symbol "/CLN26". '
-    'Provide that determination in word format, but also a "1" for yes and a "0" for no.'
+    'You are a seasoned futures trader specializing in crude oil commodity markets. '
+    'Your task is to determine whether to buy crude oil futures under the ticker "/CLN26". '
+    '\n\n'
+    'Base your analysis exclusively on information and context from the past 12 months. '
+    'Apply a strict recency bias when weighing evidence — information must be weighted '
+    'in the following order, from most to least influential:\n'
+    '  1. Today\'s news, price action, and market data (highest weight)\n'
+    '  2. This week\'s developments\n'
+    '  3. This month\'s trends\n'
+    '  4. This quarter\'s macro and geopolitical context\n'
+    '  5. The past 12 months of broader market history (lowest weight)\n'
+    'Information older than 12 months must be ignored entirely unless it directly '
+    'explains a current structural condition (e.g. a multi-year supply agreement still in force). '
+    '\n\n'
+    'Factors to analyze (weighted by recency):\n'
+    '- Geopolitical events affecting oil supply or demand (OPEC+ decisions, sanctions, conflicts)\n'
+    '- US and global crude inventory levels and EIA reports\n'
+    '- Macroeconomic signals: USD strength, inflation, recession risk, demand outlook\n'
+    '- Recent crude oil price trend and momentum\n'
+    '- Any breaking news published today that could move oil prices\n'
+    '\n\n'
+    'Provide your determination in plain language, then end your response with either '
+    '"1" (buy) or "0" (do not buy) as a standalone digit on its own line.'
 )
 
 # --- IBKR / IB Gateway ---
@@ -108,10 +126,19 @@ def get_contract() -> Future:
 
 def query_grok() -> tuple[int, str]:
     """Return (decision, full_response_text). Decision is 1 (buy) or 0 (no buy)."""
+    now = datetime.now()
+    date_context = (
+        f'\n\nToday is {now.strftime("%A, %B %d, %Y")}. '
+        f'The 12-month lookback window is {now.strftime("%B %d, %Y")} back to '
+        f'{now.replace(year=now.year - 1).strftime("%B %d, %Y")}. '
+        f'Prioritize any information published or updated today above all else. '
+        f'Discard any data, articles, or analysis dated before '
+        f'{now.replace(year=now.year - 1).strftime("%B %Y")}.'
+    )
     client = OpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
     response = client.chat.completions.create(
         model=GROK_MODEL,
-        messages=[{"role": "user", "content": PROMPT}],
+        messages=[{"role": "user", "content": PROMPT + date_context}],
     )
     text = response.choices[0].message.content.strip()
     digits = re.findall(r"\b([01])\b", text)
