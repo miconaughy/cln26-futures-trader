@@ -99,14 +99,15 @@ POLL_INTERVAL_SECONDS = 300   # 5 minutes
 log = logging.getLogger(__name__)
 
 _ib = IB()
-_pnl_sub = None  # account-level PnL subscription, set on connect
+_pnl_sub     = None   # account-level PnL subscription, set on connect
+_pending_buy = False  # True after a buy order until IB confirms the position
 
 # Shared state — read by ui.py for display
 position_cache: dict = {
-    "contracts":     0,
+    "contracts":      0,
     "unrealized_pnl": None,
-    "daily_pnl":     None,
-    "updated_at":    None,
+    "daily_pnl":      None,
+    "updated_at":     None,
 }
 last_decision: dict = {"value": None, "updated_at": None}
 
@@ -183,9 +184,13 @@ def send_alert(subject: str, body: str) -> None:
 
 def get_open_position() -> int:
     """Return long contract count and update position_cache with P&L data."""
+    global _pending_buy
     ib = get_ib()
 
-    # Use positions() for the authoritative contract count — more reliable than portfolio()
+    # Force IB Gateway to send fresh position data before reading
+    ib.reqPositions()
+    ib.sleep(2)
+
     count = 0
     for pos in ib.positions():
         c = pos.contract
@@ -194,7 +199,11 @@ def get_open_position() -> int:
             count = int(pos.position) if pos.position > 0 else 0
             break
 
-    # Use portfolio() for P&L data on the matching position
+    # Once IB confirms the position, clear the pending-buy guard
+    if count > 0:
+        _pending_buy = False
+
+    # P&L from portfolio() — separate from position count
     unrealized_pnl = None
     for item in ib.portfolio():
         c = item.contract
@@ -265,23 +274,28 @@ def run_cycle() -> None:
         )
         return
 
-    if decision == 1 and open_contracts < MAX_CONTRACTS:
+    # Treat a pending (unconfirmed) buy as already at the limit
+    effective_contracts = MAX_CONTRACTS if _pending_buy else open_contracts
+
+    if decision == 1 and effective_contracts < MAX_CONTRACTS:
         log.info("Signal BUY, holding %d/%d contract(s) — placing buy order.",
                  open_contracts, MAX_CONTRACTS)
         try:
             execute_buy()
+            _pending_buy = True
         except Exception as exc:
             log.error("Buy order failed: %s", exc)
             send_alert(
                 subject="[Trader] Buy order failed",
                 body=f"Signal was BUY but order failed at {datetime.now()}\n\n{exc}",
             )
-    elif decision == 1 and open_contracts >= MAX_CONTRACTS:
+    elif decision == 1 and effective_contracts >= MAX_CONTRACTS:
         log.info("Signal BUY, already at max %d contract(s) — holding.", MAX_CONTRACTS)
     elif decision == -1 and open_contracts > 0:
         log.info("Signal SELL, closing open position of %d contract(s).", open_contracts)
         try:
             execute_sell(open_contracts)
+            _pending_buy = False
         except Exception as exc:
             log.error("Sell order failed: %s", exc)
             send_alert(
