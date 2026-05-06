@@ -39,7 +39,7 @@ GROK_MODEL   = "grok-3"
 
 PROMPT = (
     'You are a seasoned futures trader specializing in crude oil commodity markets. '
-    'Your task is to determine whether to buy crude oil futures under the ticker "/CLN26". '
+    'Your task is to issue a trading signal for crude oil futures under the ticker "/CLN26". '
     '\n\n'
     'Base your analysis exclusively on information and context from the past 12 months. '
     'Apply a strict recency bias when weighing evidence — information must be weighted '
@@ -59,8 +59,12 @@ PROMPT = (
     '- Recent crude oil price trend and momentum\n'
     '- Any breaking news published today that could move oil prices\n'
     '\n\n'
-    'Provide your determination in plain language, then end your response with either '
-    '"1" (buy) or "0" (do not buy) as a standalone digit on its own line.'
+    'Provide your analysis in plain language, then end your response with exactly one of '
+    'these signals on its own line:\n'
+    '  1  — Buy: conditions support opening a new long position\n'
+    ' -1  — Sell: conditions support closing an existing long position\n'
+    '  0  — Hold: no action warranted\n'
+    'Output only the digit (1, -1, or 0) on the final line, with no other text on that line.'
 )
 
 # --- IBKR / IB Gateway ---
@@ -141,8 +145,8 @@ def query_grok() -> tuple[int, str]:
         messages=[{"role": "user", "content": PROMPT + date_context}],
     )
     text = response.choices[0].message.content.strip()
-    digits = re.findall(r"\b([01])\b", text)
-    decision = int(digits[-1]) if digits else 0
+    signals = re.findall(r"(?<!\d)(-1|0|1)(?!\d)", text)
+    decision = int(signals[-1]) if signals else 0
     return decision, text
 
 
@@ -211,14 +215,15 @@ def run_cycle() -> None:
 
     try:
         decision, response_text = query_grok()
+        label = {1: "BUY", -1: "SELL", 0: "HOLD"}.get(decision, str(decision))
         log.info("Grok says:\n%s", response_text)
-        log.info("Parsed decision: %d", decision)
+        log.info("Parsed signal: %s (%d)", label, decision)
         last_decision["value"]      = decision
         last_decision["updated_at"] = datetime.now()
     except Exception as exc:
         log.error("Grok query failed: %s", exc)
         send_alert(
-            subject="[Trader] Grok API error — defaulting to NO BUY",
+            subject="[Trader] Grok API error — defaulting to HOLD",
             body=f"Error at {datetime.now()}\n\n{exc}",
         )
 
@@ -234,29 +239,31 @@ def run_cycle() -> None:
         return
 
     if decision == 1 and open_contracts == 0:
-        log.info("Decision BUY, no open position — placing buy order.")
+        log.info("Signal BUY, no open position — placing buy order.")
         try:
             execute_buy()
         except Exception as exc:
             log.error("Buy order failed: %s", exc)
             send_alert(
                 subject="[Trader] Buy order failed",
-                body=f"Decision was BUY but order failed at {datetime.now()}\n\n{exc}",
+                body=f"Signal was BUY but order failed at {datetime.now()}\n\n{exc}",
             )
     elif decision == 1 and open_contracts > 0:
-        log.info("Decision BUY, already holding %d contract(s) — holding.", open_contracts)
-    elif decision == 0 and open_contracts > 0:
-        log.info("Decision NO BUY, closing open position of %d contract(s).", open_contracts)
+        log.info("Signal BUY, already holding %d contract(s) — holding.", open_contracts)
+    elif decision == -1 and open_contracts > 0:
+        log.info("Signal SELL, closing open position of %d contract(s).", open_contracts)
         try:
             execute_sell(open_contracts)
         except Exception as exc:
             log.error("Sell order failed: %s", exc)
             send_alert(
                 subject="[Trader] Sell order failed",
-                body=f"Decision was SELL but order failed at {datetime.now()}\n\n{exc}",
+                body=f"Signal was SELL but order failed at {datetime.now()}\n\n{exc}",
             )
+    elif decision == -1 and open_contracts == 0:
+        log.info("Signal SELL, no open position — nothing to close.")
     else:
-        log.info("Decision NO BUY, no open position — nothing to do.")
+        log.info("Signal HOLD — no action.")
 
 
 def main():

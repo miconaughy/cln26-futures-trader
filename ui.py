@@ -381,10 +381,10 @@ class TraderApp(App):
             lines.append(f"[dim]FLAT[/dim]  —  {trader.FUTURES_SYMBOL}")
 
         if decision is not None and dec_time:
-            dec_label = "[green]BUY (1)[/green]" if decision == 1 else "[red]NO BUY (0)[/red]"
-            lines.append(f"Last Grok decision: {dec_label}  at {dec_time.strftime('%H:%M:%S')}")
+            dec_label = {1: "[green]BUY (1)[/green]", -1: "[red]SELL (-1)[/red]", 0: "[yellow]HOLD (0)[/yellow]"}.get(decision, str(decision))
+            lines.append(f"Last Grok signal: {dec_label}  at {dec_time.strftime('%H:%M:%S')}")
         else:
-            lines.append("Last Grok decision: [dim]—[/dim]")
+            lines.append("Last Grok signal: [dim]—[/dim]")
 
         if updated:
             lines.append(f"[dim]Position updated {updated.strftime('%H:%M:%S')}[/dim]")
