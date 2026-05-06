@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-Crude Oil Futures Automated Trader
+Crude Oil Futures Automated Trader — IBKR Edition
 
 Every POLL_INTERVAL_SECONDS the script:
   1. Sends PROMPT to Grok and parses a buy decision (1 = buy, 0 = no buy).
-  2. Checks the account for an open position in FUTURES_SYMBOL.
+  2. Checks the account for an open position in the configured futures contract.
   3. decision=1, no position  → place a market buy order.
      decision=1, position open → hold (no duplicate buy).
      decision=0, position open → close the position with a market sell.
      decision=0, no position  → do nothing.
   4. On any error → defaults to 0, waits for the next cycle, and sends an email alert.
 
-All user-configurable values are in the OPEN VARIABLES section below.
+Prerequisites:
+  - IB Gateway (or TWS) must be running with API access enabled.
+  - Paper trading port: 7497. Live trading port: 7496.
+  - Enable API: IB Gateway → Configure → API → Settings → Enable ActiveX and Socket Clients
 """
 
 import os
@@ -24,8 +27,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from openai import OpenAI
-import schwab
-import schwab.orders.common as orders
+from ib_insync import IB, Future, MarketOrder
 
 # ============================================================
 # OPEN VARIABLES — Edit these to configure the script
@@ -43,19 +45,24 @@ PROMPT = (
     'Provide that determination in word format, but also a "1" for yes and a "0" for no.'
 )
 
-# --- Schwab / ThinkOrSwim ---
-SCHWAB_APP_KEY      = os.environ.get("SCHWAB_APP_KEY",      "your-schwab-app-key")
-SCHWAB_APP_SECRET   = os.environ.get("SCHWAB_APP_SECRET",   "your-schwab-app-secret")
-SCHWAB_TOKEN_PATH   = "schwab_token.json"   # written on first OAuth login; refreshed automatically
-SCHWAB_ACCOUNT_HASH = os.environ.get("SCHWAB_ACCOUNT_HASH", "your-account-hash")
+# --- IBKR / IB Gateway ---
+IB_HOST      = "127.0.0.1"
+IB_PORT      = 4002   # 4002 = IB Gateway paper trading, 4001 = IB Gateway live trading
+IB_CLIENT_ID = 1
 
-FUTURES_SYMBOL   = "/CLN26"
-ORDER_QUANTITY   = 1        # contracts per cycle
+# --- Futures contract ---
+# /CLN26 = Crude Oil (CL), July 2026 (N = July), NYMEX
+FUTURES_SYMBOL       = "/CLN26"
+IB_CONTRACT_SYMBOL   = "CL"
+IB_CONTRACT_EXPIRY   = "202607"   # YYYYMM
+IB_CONTRACT_EXCHANGE = "NYMEX"
+IB_CONTRACT_CURRENCY = "USD"
+ORDER_QUANTITY       = 1          # contracts per cycle
 
 # --- Email alerts ---
-ALERT_EMAIL_FROM     = "your-sender@gmail.com"
-ALERT_EMAIL_TO       = "your-alert-email@example.com"
-ALERT_EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "your-gmail-app-password")
+ALERT_EMAIL_FROM     = os.environ.get("ALERT_EMAIL_FROM", "your-sender@gmail.com")
+ALERT_EMAIL_TO       = os.environ.get("ALERT_EMAIL_TO",   "your-alert-email@example.com")
+ALERT_EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD",   "your-gmail-app-password")
 SMTP_SERVER          = "smtp.gmail.com"
 SMTP_PORT            = 587
 
@@ -66,15 +73,30 @@ POLL_INTERVAL_SECONDS = 300   # 5 minutes
 # INTERNALS — No need to edit below this line
 # ============================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    handlers=[
-        logging.FileHandler("trader.log"),
-        logging.StreamHandler(),
-    ],
-)
 log = logging.getLogger(__name__)
+
+_ib = IB()
+
+# Shared state — read by ui.py for display
+position_cache: dict = {"contracts": 0, "updated_at": None}
+last_decision:  dict = {"value": None, "updated_at": None}
+
+
+def get_ib() -> IB:
+    """Return a connected IB instance, reconnecting automatically if the session dropped."""
+    if not _ib.isConnected():
+        _ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
+        log.info("Connected to IB Gateway at %s:%d", IB_HOST, IB_PORT)
+    return _ib
+
+
+def get_contract() -> Future:
+    return Future(
+        symbol=IB_CONTRACT_SYMBOL,
+        lastTradeDateOrContractMonth=IB_CONTRACT_EXPIRY,
+        exchange=IB_CONTRACT_EXCHANGE,
+        currency=IB_CONTRACT_CURRENCY,
+    )
 
 
 # ---------- Grok ----------
@@ -87,7 +109,6 @@ def query_grok() -> tuple[int, str]:
         messages=[{"role": "user", "content": PROMPT}],
     )
     text = response.choices[0].message.content.strip()
-    # Take the last standalone 0 or 1 in the response as the signal
     digits = re.findall(r"\b([01])\b", text)
     decision = int(digits[-1]) if digits else 0
     return decision, text
@@ -111,59 +132,43 @@ def send_alert(subject: str, body: str) -> None:
         log.error("Failed to send alert email: %s", exc)
 
 
-# ---------- Schwab / ThinkOrSwim ----------
-
-def get_schwab_client():
-    """Return an authenticated Schwab client; refreshes the OAuth token automatically."""
-    return schwab.auth.client_from_token_file(
-        SCHWAB_TOKEN_PATH,
-        SCHWAB_APP_KEY,
-        SCHWAB_APP_SECRET,
-    )
-
+# ---------- IBKR ----------
 
 def get_open_position() -> int:
-    """Return the number of long contracts currently held for FUTURES_SYMBOL, or 0 if none."""
-    client = get_schwab_client()
-    resp = client.get_account(SCHWAB_ACCOUNT_HASH, fields=[client.Account.Fields.POSITIONS])
-    resp.raise_for_status()
-    positions = resp.json().get("securitiesAccount", {}).get("positions", [])
-    for pos in positions:
-        if pos.get("instrument", {}).get("symbol") == FUTURES_SYMBOL:
-            return int(pos.get("longQuantity", 0))
-    return 0
+    """Return the number of long contracts held for the configured futures contract, or 0."""
+    ib = get_ib()
+    count = 0
+    for pos in ib.positions():
+        c = pos.contract
+        if (c.symbol == IB_CONTRACT_SYMBOL
+                and c.lastTradeDateOrContractMonth.startswith(IB_CONTRACT_EXPIRY)):
+            count = int(pos.position) if pos.position > 0 else 0
+            break
+    position_cache["contracts"]  = count
+    position_cache["updated_at"] = datetime.now()
+    return count
 
 
 def execute_buy() -> None:
-    """Place a market buy order for FUTURES_SYMBOL."""
-    client = get_schwab_client()
-    order = (
-        orders.OrderBuilder()
-        .set_order_type(orders.OrderType.MARKET)
-        .set_session(orders.Session.NORMAL)
-        .set_duration(orders.Duration.DAY)
-        .set_order_strategy_type(orders.OrderStrategyType.SINGLE)
-        .add_equity_leg(orders.EquityInstruction.BUY, FUTURES_SYMBOL, ORDER_QUANTITY)
-    )
-    resp = client.place_order(SCHWAB_ACCOUNT_HASH, order)
-    resp.raise_for_status()
-    log.info("Buy order placed: %s x%d", FUTURES_SYMBOL, ORDER_QUANTITY)
+    """Place a market buy order for ORDER_QUANTITY contracts."""
+    ib = get_ib()
+    contract = get_contract()
+    ib.qualifyContracts(contract)
+    trade = ib.placeOrder(contract, MarketOrder("BUY", ORDER_QUANTITY))
+    ib.sleep(1)
+    log.info("Buy order placed: %s x%d — status: %s",
+             FUTURES_SYMBOL, ORDER_QUANTITY, trade.orderStatus.status)
 
 
 def execute_sell(quantity: int) -> None:
-    """Place a market sell order to close the open FUTURES_SYMBOL position."""
-    client = get_schwab_client()
-    order = (
-        orders.OrderBuilder()
-        .set_order_type(orders.OrderType.MARKET)
-        .set_session(orders.Session.NORMAL)
-        .set_duration(orders.Duration.DAY)
-        .set_order_strategy_type(orders.OrderStrategyType.SINGLE)
-        .add_equity_leg(orders.EquityInstruction.SELL, FUTURES_SYMBOL, quantity)
-    )
-    resp = client.place_order(SCHWAB_ACCOUNT_HASH, order)
-    resp.raise_for_status()
-    log.info("Sell order placed: %s x%d", FUTURES_SYMBOL, quantity)
+    """Place a market sell order to close the open position."""
+    ib = get_ib()
+    contract = get_contract()
+    ib.qualifyContracts(contract)
+    trade = ib.placeOrder(contract, MarketOrder("SELL", quantity))
+    ib.sleep(1)
+    log.info("Sell order placed: %s x%d — status: %s",
+             FUTURES_SYMBOL, quantity, trade.orderStatus.status)
 
 
 # ---------- Main cycle ----------
@@ -172,20 +177,19 @@ def run_cycle() -> None:
     log.info("=== Cycle start ===")
     decision = 0
 
-    # 1. Query Grok
     try:
         decision, response_text = query_grok()
         log.info("Grok says:\n%s", response_text)
         log.info("Parsed decision: %d", decision)
+        last_decision["value"]      = decision
+        last_decision["updated_at"] = datetime.now()
     except Exception as exc:
         log.error("Grok query failed: %s", exc)
         send_alert(
             subject="[Trader] Grok API error — defaulting to NO BUY",
             body=f"Error at {datetime.now()}\n\n{exc}",
         )
-        decision = 0
 
-    # 2. Check current position
     try:
         open_contracts = get_open_position()
         log.info("Open position: %d contract(s)", open_contracts)
@@ -197,7 +201,6 @@ def run_cycle() -> None:
         )
         return
 
-    # 3. Act based on decision × position state
     if decision == 1 and open_contracts == 0:
         log.info("Decision BUY, no open position — placing buy order.")
         try:
@@ -225,19 +228,23 @@ def run_cycle() -> None:
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(message)s",
+        handlers=[
+            logging.FileHandler("trader.log"),
+            logging.StreamHandler(),
+        ],
+    )
     log.info(
-        "Crude Oil Futures Trader started | symbol=%s | interval=%ds",
-        FUTURES_SYMBOL, POLL_INTERVAL_SECONDS,
+        "Crude Oil Futures Trader started | symbol=%s | port=%d | interval=%ds",
+        FUTURES_SYMBOL, IB_PORT, POLL_INTERVAL_SECONDS,
     )
 
-    # One-time check: warn if placeholders are still set
-    for name, val in [
-        ("GROK_API_KEY", GROK_API_KEY),
-        ("SCHWAB_APP_KEY", SCHWAB_APP_KEY),
-        ("SCHWAB_ACCOUNT_HASH", SCHWAB_ACCOUNT_HASH),
-    ]:
-        if val.startswith("your-"):
-            log.warning("OPEN VARIABLE not set: %s — edit trader.py or set the env var.", name)
+    if GROK_API_KEY.startswith("your-"):
+        log.warning("GROK_API_KEY not set — edit trader.py or set the env var.")
+
+    get_ib()  # connect at startup; auto-reconnects on each cycle if needed
 
     while True:
         run_cycle()
