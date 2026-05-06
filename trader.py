@@ -191,11 +191,12 @@ def get_open_position() -> int:
     ib.reqPositions()
     ib.sleep(2)
 
+    # Match on symbol + secType only — IB returns the last-trade date (e.g. '20260622'),
+    # not the delivery month ('202607'), so startswith matching on expiry is unreliable.
     count = 0
     for pos in ib.positions():
         c = pos.contract
-        if (c.symbol == IB_CONTRACT_SYMBOL
-                and c.lastTradeDateOrContractMonth.startswith(IB_CONTRACT_EXPIRY)):
+        if c.symbol == IB_CONTRACT_SYMBOL and c.secType == 'FUT':
             count = int(pos.position) if pos.position > 0 else 0
             break
 
@@ -207,8 +208,7 @@ def get_open_position() -> int:
     unrealized_pnl = None
     for item in ib.portfolio():
         c = item.contract
-        if (c.symbol == IB_CONTRACT_SYMBOL
-                and c.lastTradeDateOrContractMonth.startswith(IB_CONTRACT_EXPIRY)):
+        if c.symbol == IB_CONTRACT_SYMBOL and c.secType == 'FUT':
             unrealized_pnl = item.unrealizedPNL
             break
 
