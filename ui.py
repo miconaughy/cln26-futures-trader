@@ -478,7 +478,7 @@ class TraderApp(App):
         btn.label = "⚠  Exit All"
 
     def action_edit_prompt(self) -> None:
-        def on_dismiss(result: str | None) -> None:
+        def on_dismiss(result) -> None:
             if result is None:
                 return
             trader.PROMPT = result
