@@ -161,39 +161,95 @@ def get_contract() -> Future:
 
 # ---------- Market data ----------
 
+def _valid_price(value) -> bool:
+    """Return True if value is a usable number (not None or NaN)."""
+    import math
+    try:
+        return value is not None and not math.isnan(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def get_market_snapshot() -> str:
     """
-    Fetch the last 5 minutes of 1-minute OHLCV bars for the configured contract.
+    Fetch the current quote and recent 1-minute bars for the configured contract.
+    Uses delayed data mode (type 3) so paper accounts without a live subscription
+    still receive 15-min delayed quotes. Tries TRADES bars, falls back to MIDPOINT.
     Returns a formatted string ready to inject into the Grok prompt.
     """
+    import math
+
+    def _valid(v):
+        try:
+            return v is not None and not math.isnan(float(v))
+        except (TypeError, ValueError):
+            return False
+
     ib = get_ib()
     contract = get_contract()
     ib.qualifyContracts(contract)
 
-    bars = ib.reqHistoricalData(
-        contract,
-        endDateTime="",       # empty = right now
-        durationStr="300 S",  # 300 seconds = 5 minutes
-        barSizeSetting="1 min",
-        whatToShow="TRADES",
-        useRTH=False,
-        formatDate=1,
-        keepUpToDate=False,
-    )
+    # Type 3 = delayed data, free for all IBKR accounts — must be set before reqMktData
+    ib.reqMarketDataType(3)
 
-    if not bars:
-        return "No recent price data available from IBKR."
+    # Streaming subscription (not snapshot) — more reliable at receiving delayed ticks
+    ticker = ib.reqMktData(contract, "", False, False)
+    ib.sleep(4)
+    ib.cancelMktData(contract)
 
-    lines = [
-        f"Live {IB_CONTRACT_SYMBOL} futures price (1-min bars, last 5 minutes, pulled from IBKR seconds ago):"
-    ]
-    for bar in bars:
-        lines.append(
-            f"  {bar.date}  Open={bar.open:.2f}  High={bar.high:.2f}"
-            f"  Low={bar.low:.2f}  Close={bar.close:.2f}  Volume={bar.volume}"
+    # Recent 1-minute bars — TRADES first, then MIDPOINT
+    # Use 1800 S (30 min) — IB requires at least this duration for 1-min bars
+    bars = []
+    for show in ("TRADES", "MIDPOINT"):
+        try:
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime="",
+                durationStr="1800 S",
+                barSizeSetting="1 min",
+                whatToShow=show,
+                useRTH=False,
+                formatDate=1,
+                keepUpToDate=False,
+            )
+        except Exception as exc:
+            log.warning("reqHistoricalData whatToShow=%s failed: %s", show, exc)
+        if bars:
+            log.info("Market snapshot: %d bar(s) via whatToShow=%s", len(bars), show)
+            break
+
+    lines = [f"Live {IB_CONTRACT_SYMBOL} futures price (pulled from IBKR seconds ago):"]
+
+    if _valid(ticker.last):
+        lines.append(f"  Last traded price:  ${ticker.last:.2f}")
+    if _valid(ticker.bid) and _valid(ticker.ask):
+        lines.append(f"  Bid / Ask:          ${ticker.bid:.2f} / ${ticker.ask:.2f}")
+    if _valid(ticker.close):
+        lines.append(f"  Previous close:     ${ticker.close:.2f}")
+
+    if bars:
+        lines.append("  Recent 1-min bars (last 5, oldest → newest):")
+        for bar in bars[-5:]:
+            lines.append(
+                f"    {bar.date}  O={bar.open:.2f}  H={bar.high:.2f}"
+                f"  L={bar.low:.2f}  C={bar.close:.2f}  Vol={bar.volume}"
+            )
+        lines.append(f"  Current price (most recent bar close): ${bars[-1].close:.2f}")
+
+    if len(lines) == 1:
+        log.warning(
+            "Market snapshot: no price data returned — market may be closed "
+            "or the account lacks a market data subscription for this contract."
         )
-    lines.append(f"Current price (most recent close): ${bars[-1].close:.2f}")
-    return "\n".join(lines)
+        return (
+            "No price data available from IBKR at this time (market closed or "
+            "subscription required). Use your best estimate of the current crude "
+            "oil price based on the most recent news and analysis available."
+        )
+
+    snapshot = "\n".join(lines)
+    log.info("Market snapshot injected into Grok prompt:\n%s", snapshot)
+    return snapshot
 
 
 # ---------- Grok ----------
@@ -202,7 +258,6 @@ def query_grok() -> tuple[int, str]:
     """Return (decision, full_response_text). Decision is 1 (buy), -1 (sell), or 0 (hold)."""
     now = datetime.now()
 
-    # Pull live price data from IBKR and inject it into the prompt
     try:
         price_context = get_market_snapshot()
     except Exception as exc:
@@ -218,8 +273,12 @@ def query_grok() -> tuple[int, str]:
         f'{now.replace(year=now.year - 1).strftime("%B %Y")}.'
     )
 
-    live_price_context = f"\n\nCURRENT MARKET DATA (treat this as ground truth for the current price):\n{price_context}\n"
+    live_price_context = (
+        f"\n\nCURRENT MARKET DATA (treat this as ground truth for the current price):\n"
+        f"{price_context}\n"
+    )
 
+    log.info("Running prompt in Grok...")
     client = OpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
     response = client.chat.completions.create(
         model=GROK_MODEL,
