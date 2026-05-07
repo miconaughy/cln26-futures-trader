@@ -61,10 +61,9 @@ PROMPT = (
     '\n\n'
     'Provide your analysis in plain language, then end your response with exactly one of '
     'these signals on its own line:\n'
-    '  1  — Buy: conditions support opening a new long position\n'
-    ' -1  — Sell: conditions support closing an existing long position\n'
-    '  0  — Hold: no action warranted\n'
-    'Output only the digit (1, -1, or 0) on the final line, with no other text on that line.'
+    '  1  — Buy: conditions support opening or holding a long position\n'
+    '  0  — Exit / Stay flat: close any open position, or stay out if already flat\n'
+    'Output only the digit (1 or 0) on the final line, with no other text on that line.'
 )
 
 # --- IBKR / IB Gateway ---
@@ -278,14 +277,22 @@ def query_grok() -> tuple[int, str]:
         f"{price_context}\n"
     )
 
+    # Prepend the active ticker so Grok uses the current symbol even if
+    # the user's saved prompt still references the old one.
+    symbol_context = (
+        f"ACTIVE CONTRACT: You are analyzing {FUTURES_SYMBOL} "
+        f"(IB symbol: {IB_CONTRACT_SYMBOL}, expiry: {IB_CONTRACT_EXPIRY}). "
+        f"All analysis and the final signal must be for this specific contract.\n\n"
+    )
+
     log.info("Running prompt in Grok...")
     client = OpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
     response = client.chat.completions.create(
         model=GROK_MODEL,
-        messages=[{"role": "user", "content": PROMPT + date_context + live_price_context}],
+        messages=[{"role": "user", "content": symbol_context + PROMPT + date_context + live_price_context}],
     )
     text = response.choices[0].message.content.strip()
-    signals = re.findall(r"(?<!\d)(-1|0|1)(?!\d)", text)
+    signals = re.findall(r"(?<!\d)(0|1)(?!\d)", text)
     decision = int(signals[-1]) if signals else 0
     return decision, text
 
@@ -418,7 +425,7 @@ def run_cycle() -> None:
 
     try:
         decision, response_text = query_grok()
-        label = {1: "BUY", -1: "SELL", 0: "HOLD"}.get(decision, str(decision))
+        label = {1: "BUY", 0: "EXIT/HOLD"}.get(decision, str(decision))
         log.info("Grok says:\n%s", response_text)
         log.info("Parsed signal: %s (%d)", label, decision)
         last_decision["value"]      = decision
@@ -447,8 +454,8 @@ def run_cycle() -> None:
             )
     elif decision == 1 and effective_contracts >= MAX_CONTRACTS:
         log.info("Signal BUY, already at max %d contract(s) — holding.", MAX_CONTRACTS)
-    elif decision == -1 and open_contracts > 0:
-        log.info("Signal SELL, closing open position of %d contract(s).", open_contracts)
+    elif decision == 0 and open_contracts > 0:
+        log.info("Signal EXIT, closing open position of %d contract(s).", open_contracts)
         try:
             execute_sell(open_contracts)
             _pending_buy = False
@@ -456,12 +463,10 @@ def run_cycle() -> None:
             log.error("Sell order failed: %s", exc)
             send_alert(
                 subject="[Trader] Sell order failed",
-                body=f"Signal was SELL but order failed at {datetime.now()}\n\n{exc}",
+                body=f"Signal was EXIT but order failed at {datetime.now()}\n\n{exc}",
             )
-    elif decision == -1 and open_contracts == 0:
-        log.info("Signal SELL, no open position — nothing to close.")
-    else:
-        log.info("Signal HOLD — no action.")
+    elif decision == 0 and open_contracts == 0:
+        log.info("Signal HOLD — flat, no action.")
 
 
 def main():

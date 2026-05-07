@@ -425,7 +425,7 @@ class TraderApp(App):
             lines.append("Daily P&L:      [dim]—[/dim]")
 
         if decision is not None and dec_time:
-            dec_label = {1: "[green]BUY (1)[/green]", -1: "[red]SELL (-1)[/red]", 0: "[yellow]HOLD (0)[/yellow]"}.get(decision, str(decision))
+            dec_label = {1: "[green]BUY (1)[/green]", 0: "[yellow]EXIT / HOLD (0)[/yellow]"}.get(decision, str(decision))
             lines.append(f"Last Grok signal: {dec_label}  at {dec_time.strftime('%H:%M:%S')}")
         else:
             lines.append("Last Grok signal: [dim]—[/dim]")
