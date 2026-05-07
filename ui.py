@@ -221,7 +221,7 @@ class TraderApp(App):
     Input.invalid { border: tall $error; }
 
     #position-panel {
-        height: 9;
+        height: auto;
         border: tall $primary;
         background: $panel;
         padding: 0 1;
@@ -396,39 +396,52 @@ class TraderApp(App):
             label.update("")
 
     def _refresh_position_panel(self) -> None:
-        content        = self.query_one("#position-content", Static)
-        contracts      = trader.position_cache.get("contracts", 0)
-        unrealized_pnl = trader.position_cache.get("unrealized_pnl")
-        daily_pnl      = trader.position_cache.get("daily_pnl")
-        updated        = trader.position_cache.get("updated_at")
-        decision       = trader.last_decision.get("value")
-        dec_time       = trader.last_decision.get("updated_at")
+        content   = self.query_one("#position-content", Static)
+        daily_pnl = trader.position_cache.get("daily_pnl")
+        updated   = trader.position_cache.get("updated_at")
+        decision  = trader.last_decision.get("value")
+        dec_time  = trader.last_decision.get("updated_at")
+        portfolio = trader.portfolio_cache
+
+        def _fmt_pnl(value):
+            if value is None:
+                return "[dim]—[/dim]"
+            color = "green" if value >= 0 else "red"
+            sign  = "+" if value >= 0 else ""
+            return f"[{color}]{sign}${value:,.2f}[/{color}]"
 
         lines = []
-        if contracts > 0:
-            lines.append(f"[green]LONG  {contracts} contract{'s' if contracts != 1 else ''}[/green]  —  {trader.FUTURES_SYMBOL}")
-        else:
-            lines.append(f"[dim]FLAT[/dim]  —  {trader.FUTURES_SYMBOL}")
 
-        if unrealized_pnl is not None:
-            color = "green" if unrealized_pnl >= 0 else "red"
-            sign  = "+" if unrealized_pnl >= 0 else ""
-            lines.append(f"P&L from open:  [{color}]{sign}${unrealized_pnl:,.2f}[/{color}]")
-        else:
-            lines.append("P&L from open:  [dim]—[/dim]")
+        # ── Portfolio table ──────────────────────────────────────────────────
+        col = f"{'Symbol':<8}  {'Type':<4}  {'Qty':>5}  {'Mkt Price':>11}  {'Avg Cost':>11}  {'P&L Open':>13}  {'P&L Daily':>13}"
+        lines.append(f"[bold]{col}[/bold]")
+        lines.append("─" * len(col))
 
-        if daily_pnl is not None:
-            color = "green" if daily_pnl >= 0 else "red"
-            sign  = "+" if daily_pnl >= 0 else ""
-            lines.append(f"Daily P&L:      [{color}]{sign}${daily_pnl:,.2f}[/{color}]")
+        if portfolio:
+            for p in portfolio:
+                symbol  = p["symbol"]
+                stype   = p["sec_type"]
+                qty     = p["qty"]
+                price_s = f"${p['market_price']:>10,.2f}" if p["market_price"] is not None else " " * 10 + "—"
+                avg_s   = f"${p['avg_cost']:>10,.2f}"     if p["avg_cost"]     is not None else " " * 10 + "—"
+                pnl_s   = _fmt_pnl(p["unrealized_pnl"])
+                # daily P&L per position requires reqPnLSingle; show account total on the
+                # first row only and blank for the rest to avoid repeating the same number.
+                dpnl_s  = _fmt_pnl(daily_pnl) if p is portfolio[0] else ""
+                lines.append(
+                    f"[cyan]{symbol:<8}[/cyan]  {stype:<4}  {qty:>5}  {price_s}  {avg_s}  {pnl_s:>13}  {dpnl_s}"
+                )
         else:
-            lines.append("Daily P&L:      [dim]—[/dim]")
+            lines.append("[dim]  No open positions.[/dim]")
 
+        lines.append("─" * len(col))
+
+        # ── Footer ───────────────────────────────────────────────────────────
         if decision is not None and dec_time:
-            dec_label = {1: "[green]BUY (1)[/green]", 0: "[yellow]EXIT / HOLD (0)[/yellow]"}.get(decision, str(decision))
-            lines.append(f"Last Grok signal: {dec_label}  at {dec_time.strftime('%H:%M:%S')}")
+            dec_label = {1: "[green]BUY[/green]", 0: "[yellow]EXIT/HOLD[/yellow]"}.get(decision, str(decision))
+            lines.append(f"Last signal: {dec_label}  at {dec_time.strftime('%H:%M:%S')}")
         else:
-            lines.append("Last Grok signal: [dim]—[/dim]")
+            lines.append("Last signal: [dim]—[/dim]")
 
         if updated:
             lines.append(f"[dim]Updated {updated.strftime('%H:%M:%S')}[/dim]")

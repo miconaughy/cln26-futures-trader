@@ -110,6 +110,9 @@ position_cache: dict = {
 }
 last_decision: dict = {"value": None, "updated_at": None}
 
+# Full portfolio snapshot — all positions, refreshed each cycle; read by ui.py
+portfolio_cache: list = []
+
 
 _MONTH_CODES = {
     'F': '01', 'G': '02', 'H': '03', 'J': '04',
@@ -135,12 +138,14 @@ def parse_futures_symbol(symbol: str) -> "tuple[str, str, str] | None":
 def get_ib() -> IB:
     """Return a connected IB instance, reconnecting automatically if the session dropped."""
     global _pnl_sub
+    import asyncio
+    # Always ensure the calling thread has an event loop — ib_insync requires one
+    # even when reusing an already-connected IB instance from a different thread.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     if not _ib.isConnected():
-        import asyncio
-        try:
-            asyncio.get_event_loop()
-        except RuntimeError:
-            asyncio.set_event_loop(asyncio.new_event_loop())
         _ib.connect(IB_HOST, IB_PORT, clientId=IB_CLIENT_ID)
         log.info("Connected to IB Gateway at %s:%d", IB_HOST, IB_PORT)
         accounts = _ib.managedAccounts()
@@ -339,13 +344,21 @@ def get_open_position() -> int:
     if count > 0:
         _pending_buy = False
 
-    # P&L from portfolio() — separate from position count
+    # Single pass through portfolio(): build full snapshot and extract CL P&L
     unrealized_pnl = None
+    portfolio_cache.clear()
     for item in ib.portfolio():
         c = item.contract
-        if c.symbol == IB_CONTRACT_SYMBOL and c.secType == 'FUT':
-            unrealized_pnl = item.unrealizedPNL
-            break
+        portfolio_cache.append({
+            "symbol":         c.symbol,
+            "sec_type":       c.secType,
+            "qty":            int(item.position),
+            "market_price":   item.marketPrice   if _valid_price(item.marketPrice)   else None,
+            "avg_cost":       item.averageCost   if _valid_price(item.averageCost)   else None,
+            "unrealized_pnl": item.unrealizedPNL if _valid_price(item.unrealizedPNL) else None,
+        })
+        if c.symbol == IB_CONTRACT_SYMBOL and c.secType == "FUT":
+            unrealized_pnl = item.unrealizedPNL if _valid_price(item.unrealizedPNL) else None
 
     daily_pnl = _pnl_sub.dailyPnL if _pnl_sub is not None else None
 
