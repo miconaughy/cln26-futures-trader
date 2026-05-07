@@ -282,7 +282,7 @@ class TraderApp(App):
         yield Horizontal(
             Horizontal(
                 Label("Symbol", classes="setting-label"),
-                Input(value=trader.FUTURES_SYMBOL, id="input-symbol", disabled=True),
+                Input(value=trader.FUTURES_SYMBOL, id="input-symbol"),
                 classes="setting-group",
             ),
             Horizontal(
@@ -317,7 +317,15 @@ class TraderApp(App):
     # ── Input handlers ────────────────────────────────────────────────────────
 
     def on_input_changed(self, event: Input.Changed) -> None:
-        if event.input.id == "input-max-contracts":
+        if event.input.id == "input-symbol":
+            result = trader.parse_futures_symbol(event.value)
+            if result is not None:
+                trader.FUTURES_SYMBOL, trader.IB_CONTRACT_SYMBOL, trader.IB_CONTRACT_EXPIRY = result
+                event.input.remove_class("invalid")
+            else:
+                event.input.add_class("invalid")
+
+        elif event.input.id == "input-max-contracts":
             try:
                 val = int(event.value.strip())
                 if val >= 1:

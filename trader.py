@@ -112,6 +112,27 @@ position_cache: dict = {
 last_decision: dict = {"value": None, "updated_at": None}
 
 
+_MONTH_CODES = {
+    'F': '01', 'G': '02', 'H': '03', 'J': '04',
+    'K': '05', 'M': '06', 'N': '07', 'Q': '08',
+    'U': '09', 'V': '10', 'X': '11', 'Z': '12',
+}
+
+
+def parse_futures_symbol(symbol: str) -> "tuple[str, str, str] | None":
+    """
+    Parse a CME-style futures symbol like /CLN26.
+    Returns (futures_symbol, ib_symbol, expiry_yyyymm) or None if invalid.
+    Month codes: F=Jan G=Feb H=Mar J=Apr K=May M=Jun N=Jul Q=Aug U=Sep V=Oct X=Nov Z=Dec
+    """
+    m = re.match(r"^/([A-Z]{1,3})([FGHJKMNQUVXZ])(\d{2})$", symbol.strip().upper())
+    if not m:
+        return None
+    ib_symbol, month_code, year_2 = m.groups()
+    expiry = f"20{year_2}{_MONTH_CODES[month_code]}"
+    return symbol.strip().upper(), ib_symbol, expiry
+
+
 def get_ib() -> IB:
     """Return a connected IB instance, reconnecting automatically if the session dropped."""
     global _pnl_sub
@@ -138,11 +159,56 @@ def get_contract() -> Future:
     )
 
 
+# ---------- Market data ----------
+
+def get_market_snapshot() -> str:
+    """
+    Fetch the last 5 minutes of 1-minute OHLCV bars for the configured contract.
+    Returns a formatted string ready to inject into the Grok prompt.
+    """
+    ib = get_ib()
+    contract = get_contract()
+    ib.qualifyContracts(contract)
+
+    bars = ib.reqHistoricalData(
+        contract,
+        endDateTime="",       # empty = right now
+        durationStr="300 S",  # 300 seconds = 5 minutes
+        barSizeSetting="1 min",
+        whatToShow="TRADES",
+        useRTH=False,
+        formatDate=1,
+        keepUpToDate=False,
+    )
+
+    if not bars:
+        return "No recent price data available from IBKR."
+
+    lines = [
+        f"Live {IB_CONTRACT_SYMBOL} futures price (1-min bars, last 5 minutes, pulled from IBKR seconds ago):"
+    ]
+    for bar in bars:
+        lines.append(
+            f"  {bar.date}  Open={bar.open:.2f}  High={bar.high:.2f}"
+            f"  Low={bar.low:.2f}  Close={bar.close:.2f}  Volume={bar.volume}"
+        )
+    lines.append(f"Current price (most recent close): ${bars[-1].close:.2f}")
+    return "\n".join(lines)
+
+
 # ---------- Grok ----------
 
 def query_grok() -> tuple[int, str]:
-    """Return (decision, full_response_text). Decision is 1 (buy) or 0 (no buy)."""
+    """Return (decision, full_response_text). Decision is 1 (buy), -1 (sell), or 0 (hold)."""
     now = datetime.now()
+
+    # Pull live price data from IBKR and inject it into the prompt
+    try:
+        price_context = get_market_snapshot()
+    except Exception as exc:
+        log.warning("Could not fetch market snapshot for Grok: %s", exc)
+        price_context = "Current price data unavailable from IBKR."
+
     date_context = (
         f'\n\nToday is {now.strftime("%A, %B %d, %Y")}. '
         f'The 12-month lookback window is {now.strftime("%B %d, %Y")} back to '
@@ -151,10 +217,13 @@ def query_grok() -> tuple[int, str]:
         f'Discard any data, articles, or analysis dated before '
         f'{now.replace(year=now.year - 1).strftime("%B %Y")}.'
     )
+
+    live_price_context = f"\n\nCURRENT MARKET DATA (treat this as ground truth for the current price):\n{price_context}\n"
+
     client = OpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
     response = client.chat.completions.create(
         model=GROK_MODEL,
-        messages=[{"role": "user", "content": PROMPT + date_context}],
+        messages=[{"role": "user", "content": PROMPT + date_context + live_price_context}],
     )
     text = response.choices[0].message.content.strip()
     signals = re.findall(r"(?<!\d)(-1|0|1)(?!\d)", text)
