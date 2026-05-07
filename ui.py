@@ -403,40 +403,51 @@ class TraderApp(App):
         dec_time  = trader.last_decision.get("updated_at")
         portfolio = trader.portfolio_cache
 
-        def _fmt_pnl(value):
+        # Column widths (visual chars, excluding markup tags)
+        W_SYM, W_TYPE, W_QTY, W_PRICE, W_AVG, W_PNL = 8, 4, 5, 11, 11, 13
+
+        def _price_col(value, width=W_PRICE):
             if value is None:
-                return "[dim]—[/dim]"
-            color = "green" if value >= 0 else "red"
+                return f"{'—':>{width}}"
+            return f"${value:>{width - 1},.2f}"
+
+        def _pnl_col(value, width=W_PNL):
+            # Pad the plain text to `width` INSIDE the markup so Rich doesn't
+            # see the tags when measuring column width.
+            if value is None:
+                return f"[dim]{'—':>{width}}[/dim]"
             sign  = "+" if value >= 0 else ""
-            return f"[{color}]{sign}${value:,.2f}[/{color}]"
+            plain = f"{sign}${value:,.2f}"
+            color = "green" if value >= 0 else "red"
+            return f"[{color}]{plain:>{width}}[/{color}]"
 
-        lines = []
+        header = (
+            f"{'Symbol':<{W_SYM}}  {'Type':<{W_TYPE}}  {'Qty':>{W_QTY}}  "
+            f"{'Mkt Price':>{W_PRICE}}  {'Avg Cost':>{W_AVG}}  "
+            f"{'P&L Open':>{W_PNL}}  {'P&L Daily':>{W_PNL}}"
+        )
+        sep = "─" * len(header)
 
-        # ── Portfolio table ──────────────────────────────────────────────────
-        col = f"{'Symbol':<8}  {'Type':<4}  {'Qty':>5}  {'Mkt Price':>11}  {'Avg Cost':>11}  {'P&L Open':>13}  {'P&L Daily':>13}"
-        lines.append(f"[bold]{col}[/bold]")
-        lines.append("─" * len(col))
+        lines = [f"[bold]{header}[/bold]", sep]
 
         if portfolio:
-            for p in portfolio:
-                symbol  = p["symbol"]
-                stype   = p["sec_type"]
+            for i, p in enumerate(portfolio):
+                sym     = p["symbol"][:W_SYM]
+                stype   = p["sec_type"][:W_TYPE]
                 qty     = p["qty"]
-                price_s = f"${p['market_price']:>10,.2f}" if p["market_price"] is not None else " " * 10 + "—"
-                avg_s   = f"${p['avg_cost']:>10,.2f}"     if p["avg_cost"]     is not None else " " * 10 + "—"
-                pnl_s   = _fmt_pnl(p["unrealized_pnl"])
-                # daily P&L per position requires reqPnLSingle; show account total on the
-                # first row only and blank for the rest to avoid repeating the same number.
-                dpnl_s  = _fmt_pnl(daily_pnl) if p is portfolio[0] else ""
+                price_s = _price_col(p["market_price"])
+                avg_s   = _price_col(p["avg_cost"])
+                pnl_s   = _pnl_col(p["unrealized_pnl"])
+                dpnl_s  = _pnl_col(daily_pnl if i == 0 else None)
                 lines.append(
-                    f"[cyan]{symbol:<8}[/cyan]  {stype:<4}  {qty:>5}  {price_s}  {avg_s}  {pnl_s:>13}  {dpnl_s}"
+                    f"[cyan]{sym:<{W_SYM}}[/cyan]  {stype:<{W_TYPE}}  {qty:>{W_QTY}}  "
+                    f"{price_s}  {avg_s}  {pnl_s}  {dpnl_s}"
                 )
         else:
             lines.append("[dim]  No open positions.[/dim]")
 
-        lines.append("─" * len(col))
+        lines.append(sep)
 
-        # ── Footer ───────────────────────────────────────────────────────────
         if decision is not None and dec_time:
             dec_label = {1: "[green]BUY[/green]", 0: "[yellow]EXIT/HOLD[/yellow]"}.get(decision, str(decision))
             lines.append(f"Last signal: {dec_label}  at {dec_time.strftime('%H:%M:%S')}")
